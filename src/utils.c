@@ -129,3 +129,16 @@ uint64_t mstime64(void)
 	// time_t could be 4 bytes
 	return ((long long)tv.tv_sec) * 1000LL + ((long long)tv.tv_usec) / 1000LL;
 }
+
+#ifdef _WIN32
+static char errbuf[256];
+
+const char* wsa_strerror(int errcode)
+{
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, errcode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errbuf, sizeof(errbuf), NULL);
+	size_t len = strlen(errbuf);
+	while (len > 0 && (errbuf[len-1] == '\r' || errbuf[len-1] == '\n'))
+		errbuf[--len] = '\0';
+	return &errbuf[0];
+}
+#endif

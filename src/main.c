@@ -34,6 +34,13 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <sys/stat.h>
+typedef unsigned int nfds_t;
+typedef unsigned int sigset_t;
+#else
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -43,9 +50,10 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 #include <fcntl.h>
-#include <getopt.h>
 #include <pwd.h>
 #include <grp.h>
+#endif
+#include <getopt.h>
 
 #include "log.h"
 #include "usb.h"
@@ -71,15 +79,17 @@ static const char *drop_user = NULL;
 static int opt_disable_hotplug = 0;
 static int opt_enable_exit = 0;
 static int opt_exit = 0;
+#ifndef _WIN32
 static int exit_signal = 0;
 static int daemon_pipe;
+#endif
 static const char *listen_addr = NULL;
 
 static int report_to_parent = 0;
 
 static int create_socket(void)
 {
-	int listenfd;
+	int listenfd = -1;
 	const char* socket_addr = socket_path;
 	const char* tcp_port;
 	char listen_addr_str[256];
@@ -87,6 +97,12 @@ static int create_socket(void)
 	if (listen_addr) {
 		socket_addr = listen_addr;
 	}
+#ifdef _WIN32
+	else {
+		socket_addr = "127.0.0.1:27015";
+	}
+#endif
+
 	tcp_port = strrchr(socket_addr, ':');
 	if (tcp_port) {
 		tcp_port++;
@@ -121,16 +137,16 @@ static int create_socket(void)
 			}
 
 			if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (void*)&yes, sizeof(int)) == -1) {
-				usbmuxd_log(LL_ERROR, "%s: setsockopt(): %s", __func__, strerror(errno));
-				close(listenfd);
+				usbmuxd_log(LL_ERROR, "%s: setsockopt(): %s", __func__, sock_strerror());
+				sock_close(listenfd);
 				listenfd = -1;
 				continue;
 			}
 
 #ifdef SO_NOSIGPIPE
 			if (setsockopt(listenfd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&yes, sizeof(int)) == -1) {
-				usbmuxd_log(LL_ERROR, "%s: setsockopt(): %s", __func__, strerror(errno));
-				close(listenfd);
+				usbmuxd_log(LL_ERROR, "%s: setsockopt(): %s", __func__, sock_strerror());
+				sock_close(listenfd);
 				listenfd = -1;
 				continue;
 			}
@@ -139,14 +155,14 @@ static int create_socket(void)
 #if defined(AF_INET6) && defined(IPV6_V6ONLY)
 			if (rp->ai_family == AF_INET6) {
 				if (setsockopt(listenfd, IPPROTO_IPV6, IPV6_V6ONLY, (void*)&yes, sizeof(int)) == -1) {
-					usbmuxd_log(LL_ERROR, "%s: setsockopt() IPV6_V6ONLY: %s", __func__, strerror(errno));
+					usbmuxd_log(LL_ERROR, "%s: setsockopt() IPV6_V6ONLY: %s", __func__, sock_strerror());
 				}
 			}
 #endif
 
 			if (bind(listenfd, rp->ai_addr, rp->ai_addrlen) < 0) {
-				usbmuxd_log(LL_FATAL, "%s: bind() failed: %s", __func__, strerror(errno));
-				close(listenfd);
+				usbmuxd_log(LL_FATAL, "%s: bind() failed: %s", __func__, sock_strerror());
+				sock_close(listenfd);
 				listenfd = -1;
 				continue;
 			}
@@ -194,6 +210,10 @@ static int create_socket(void)
 			return -1;
 		}
 	} else {
+#ifdef _WIN32
+		usbmuxd_log(LL_FATAL, "%s: listen address must be HOST:PORT on Windows", __func__);
+		return -1;
+#else
 		struct sockaddr_un bind_addr;
 
 		if (strcmp(socket_addr, socket_path) != 0) {
@@ -229,8 +249,13 @@ static int create_socket(void)
 		chmod(socket_addr, 0666);
 
 		snprintf(listen_addr_str, sizeof(listen_addr_str), "%s", socket_addr);
+#endif
 	}
 
+#ifdef _WIN32
+	u_long l_yes = 1;
+	ioctlsocket(listenfd, FIONBIO, &l_yes);
+#else
 	int flags = fcntl(listenfd, F_GETFL, 0);
 	if (flags < 0) {
 		usbmuxd_log(LL_FATAL, "ERROR: Could not get flags for socket");
@@ -239,10 +264,11 @@ static int create_socket(void)
 			usbmuxd_log(LL_FATAL, "ERROR: Could not set socket to non-blocking");
 		}
 	}
+#endif
 
 	// Start listening
 	if (listen(listenfd, 256) != 0) {
-		usbmuxd_log(LL_FATAL, "listen() failed: %s", strerror(errno));
+		usbmuxd_log(LL_FATAL, "listen() failed: %s", sock_strerror());
 		return -1;
 	}
 
@@ -251,6 +277,7 @@ static int create_socket(void)
 	return listenfd;
 }
 
+#ifndef _WIN32
 static void handle_signal(int sig)
 {
 	if (sig != SIGUSR1 && sig != SIGUSR2) {
@@ -299,17 +326,27 @@ static void set_signal_handlers(void)
 	sigaction(SIGUSR1, &sa, NULL);
 	sigaction(SIGUSR2, &sa, NULL);
 }
+#endif
 
 #ifndef HAVE_PPOLL
+#ifdef _WIN32
+#define poll WSAPoll
+#endif
 static int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout, const sigset_t *sigmask)
 {
 	int ready;
+#ifndef _WIN32
 	sigset_t origmask;
+#endif
 	int to = timeout->tv_sec*1000 + timeout->tv_nsec/1000000;
 
+#ifndef _WIN32
 	sigprocmask(SIG_SETMASK, sigmask, &origmask);
+#endif
 	ready = poll(fds, nfds, to);
+#ifndef _WIN32
 	sigprocmask(SIG_SETMASK, &origmask, NULL);
+#endif
 
 	return ready;
 }
@@ -321,8 +358,12 @@ static int main_loop(int listenfd)
 	struct fdlist pollfds;
 	struct timespec tspec;
 
+#ifdef _WIN32
+	sigset_t empty_sigset = 0;
+#else
 	sigset_t empty_sigset;
 	sigemptyset(&empty_sigset); // unmask all signals
+#endif
 
 	fdlist_create(&pollfds);
 	while(!should_exit) {
@@ -387,12 +428,21 @@ static int main_loop(int listenfd)
 					}
 				}
 			}
+			// without USB fds, busy clients would otherwise starve libusb
+			if(!done_usb && usb_uses_poll_fallback()) {
+				if(usb_process() < 0) {
+					usbmuxd_log(LL_FATAL, "usb_process() failed");
+					fdlist_free(&pollfds);
+					return -1;
+				}
+			}
 		}
 	}
 	fdlist_free(&pollfds);
 	return 0;
 }
 
+#ifndef _WIN32
 /**
  * make this program run detached from the current console
  */
@@ -474,9 +524,11 @@ static int daemonize(void)
 
 	return 0;
 }
+#endif
 
 static int notify_parent(int status)
 {
+#ifndef _WIN32
 	int res;
 
 	report_to_parent = 0;
@@ -492,6 +544,7 @@ static int notify_parent(int status)
 		usbmuxd_log(LL_FATAL, "Redirection of stderr failed.");
 		return -1;
 	}
+#endif
 	return 0;
 }
 
@@ -643,11 +696,15 @@ static void parse_opts(int argc, char **argv)
 			break;
 		case 'x':
 			opt_exit = 1;
+#ifndef _WIN32
 			exit_signal = SIGUSR1;
+#endif
 			break;
 		case 'X':
 			opt_exit = 1;
+#ifndef _WIN32
 			exit_signal = SIGTERM;
+#endif
 			break;
 		case 'l':
 			if (!*optarg) {
@@ -676,9 +733,11 @@ int main(int argc, char *argv[])
 {
 	int listenfd;
 	int res = 0;
+#ifndef _WIN32
 	int lfd;
 	struct flock lock;
 	char pids[10];
+#endif
 
 	parse_opts(argc, argv);
 
@@ -699,6 +758,7 @@ int main(int argc, char *argv[])
 	should_exit = 0;
 	should_discover = 0;
 
+#ifndef _WIN32
 	set_signal_handlers();
 	signal(SIGPIPE, SIG_IGN);
 
@@ -755,12 +815,14 @@ int main(int argc, char *argv[])
 	if (lockfile) {
 		unlink(lockfile);
 	}
+#endif
 
 	if (opt_exit) {
 		usbmuxd_log(LL_NOTICE, "No running instance found, none killed. Exiting.");
 		goto terminate;
 	}
 
+#ifndef _WIN32
 	if (!foreground) {
 		if ((res = daemonize()) < 0) {
 			fprintf(stderr, "usbmuxd: FATAL: Could not daemonize!\n");
@@ -798,8 +860,13 @@ int main(int argc, char *argv[])
 	getrlimit(RLIMIT_NOFILE, &rlim);
 	rlim.rlim_max = 65536;
 	setrlimit(RLIMIT_NOFILE, (const struct rlimit*)&rlim);
+#endif
 
 	usbmuxd_log(LL_INFO, "Creating socket");
+#ifdef _WIN32
+	WSADATA wsa_data;
+	WSAStartup(MAKEWORD(2,2), &wsa_data);
+#endif
 	res = listenfd = create_socket();
 	if(listenfd < 0)
 		goto terminate;
@@ -810,7 +877,11 @@ int main(int argc, char *argv[])
 	struct stat fst;
 	memset(&fst, '\0', sizeof(struct stat));
 	if (stat(userprefdir, &fst) < 0) {
+#ifdef _WIN32
+		if (mkdir(userprefdir) < 0) {
+#else
 		if (mkdir(userprefdir, 0775) < 0) {
+#endif
 			usbmuxd_log(LL_FATAL, "Failed to create configuration directory '%s': %s", userprefdir, strerror(errno));
 			res = -1;
 			goto terminate;
@@ -830,6 +901,7 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+#ifndef _WIN32
 	// drop elevated privileges
 	if (drop_privileges && (getuid() == 0 || geteuid() == 0)) {
 		struct passwd *pw;
@@ -883,6 +955,7 @@ int main(int argc, char *argv[])
 			usbmuxd_log(LL_NOTICE, "Successfully dropped privileges to '%s'", drop_user);
 		}
 	}
+#endif
 
 	client_init();
 	device_init();

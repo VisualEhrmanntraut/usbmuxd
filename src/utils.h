@@ -22,7 +22,11 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <poll.h>
+#endif
 #include <plist/plist.h>
 
 enum fdowner {
@@ -45,5 +49,15 @@ void fdlist_reset(struct fdlist *list);
 
 uint64_t mstime64(void);
 void get_tick_count(struct timeval * tv);
+
+#ifdef _WIN32
+const char* wsa_strerror(int errcode);
+/* Winsock reports socket errors via WSAGetLastError(), not errno */
+#define sock_strerror() wsa_strerror(WSAGetLastError())
+#define sock_close(fd) closesocket(fd)
+#else
+#define sock_strerror() strerror(errno)
+#define sock_close(fd) close(fd)
+#endif
 
 #endif

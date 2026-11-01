@@ -29,6 +29,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
+
 #include <libusb.h>
 
 #include <libimobiledevice-glue/collection.h>
@@ -37,6 +41,9 @@
 #include "log.h"
 #include "device.h"
 #include "utils.h"
+#ifdef _WIN32
+#include "usb_win32.h"
+#endif
 
 #if (defined(LIBUSB_API_VERSION) && (LIBUSB_API_VERSION >= 0x01000102)) || (defined(LIBUSBX_API_VERSION) && (LIBUSBX_API_VERSION >= 0x01000102))
 #define HAVE_LIBUSB_HOTPLUG_API 1
@@ -131,7 +138,7 @@ static void reap_dead_devices(void) {
 }
 
 // Callback from write operation
-static void tx_callback(struct libusb_transfer *xfer)
+static void LIBUSB_CALL tx_callback(struct libusb_transfer *xfer)
 {
 	struct usb_device *dev = xfer->user_data;
 	usbmuxd_log(LL_SPEW, "TX callback dev %d-%d len %d -> %d status %d", dev->bus, dev->address, xfer->length, xfer->actual_length, xfer->status);
@@ -203,7 +210,7 @@ int usb_send(struct usb_device *dev, const unsigned char *buf, int length)
 // Callback from read operation
 // Under normal operation this issues a new read transfer request immediately,
 // doing a kind of read-callback loop
-static void rx_callback(struct libusb_transfer *xfer)
+static void LIBUSB_CALL rx_callback(struct libusb_transfer *xfer)
 {
 	struct usb_device *dev = xfer->user_data;
 	usbmuxd_log(LL_SPEW, "RX callback dev %d-%d len %d status %d", dev->bus, dev->address, xfer->actual_length, xfer->status);
@@ -268,7 +275,7 @@ static int start_rx_loop(struct usb_device *dev)
 	return 0;
 }
 
-static void get_serial_callback(struct libusb_transfer *transfer)
+static void LIBUSB_CALL get_serial_callback(struct libusb_transfer *transfer)
 {
 	unsigned int di, si;
 	struct usb_device *usbdev = transfer->user_data;
@@ -335,7 +342,7 @@ static void get_serial_callback(struct libusb_transfer *transfer)
 	}
 }
 
-static void get_langid_callback(struct libusb_transfer *transfer)
+static void LIBUSB_CALL get_langid_callback(struct libusb_transfer *transfer)
 {
 	int res;
 	struct usb_device *usbdev = transfer->user_data;
@@ -527,6 +534,23 @@ static int set_valid_configuration(struct libusb_device* dev, struct usb_device 
 		}
 		if(current_config == 0 || config->bConfigurationValue != current_config) {
 			usbmuxd_log(LL_NOTICE, "Changing configuration of device %i-%i: %i -> %i", bus, address, current_config, config->bConfigurationValue);
+#ifdef _WIN32
+			/* libusb can't change the configuration on Windows, so do it
+			 * through libusb-win32 and let the device be re-discovered. */
+			if (usbdev->serial[0] == '\0') {
+				usbmuxd_log(LL_WARNING, "Could not set configuration %d for device %d-%d: serial number unknown", j, bus, address);
+				libusb_free_config_descriptor(config);
+				continue;
+			}
+			if((res = usb_win32_set_configuration(usbdev->serial, (uint8_t)j)) != 0) {
+				usbmuxd_log(LL_WARNING, "Could not set configuration %d for device %d-%d: %d", j, bus, address, res);
+				libusb_free_config_descriptor(config);
+				continue;
+			}
+			Sleep(200);
+			libusb_free_config_descriptor(config);
+			return -1;
+#else
 			for(k=0 ; k < config->bNumInterfaces ; k++) {
 				const struct libusb_interface_descriptor *intf1 = &config->interface[k].altsetting[0];
 				if((res = libusb_kernel_driver_active(handle, intf1->bInterfaceNumber)) < 0) {
@@ -546,6 +570,7 @@ static int set_valid_configuration(struct libusb_device* dev, struct usb_device 
 				libusb_free_config_descriptor(config);
 				continue;
 			}
+#endif
 		}
 		
 		libusb_free_config_descriptor(config);
@@ -655,7 +680,7 @@ static void device_complete_initialization(struct mode_context *context, struct 
 	}
 }
 
-static void switch_mode_cb(struct libusb_transfer* transfer) 
+static void LIBUSB_CALL switch_mode_cb(struct libusb_transfer* transfer) 
 {
 	// For old devices not supporting mode swtich, if anything goes wrong - continue in current mode
 	struct mode_context* context = transfer->user_data;
@@ -681,7 +706,7 @@ static void switch_mode_cb(struct libusb_transfer* transfer)
 		free(transfer->buffer);
 }
 
-static void get_mode_cb(struct libusb_transfer* transfer) 
+static void LIBUSB_CALL get_mode_cb(struct libusb_transfer* transfer) 
 {
 	// For old devices not supporting mode swtich, if anything goes wrong - continue in current mode
 	int res;
@@ -779,6 +804,23 @@ static int usb_device_add(libusb_device* dev)
 	usbdev->speed = 0;
 	usbdev->handle = handle;
 	usbdev->alive = 1;
+
+#ifdef _WIN32
+	/* set_valid_configuration() needs the serial number on Windows, and the
+	 * asynchronous serial number request only happens after it. This is a
+	 * blocking call, which is fine since libusb has no hotplug on Windows. */
+	res = libusb_get_string_descriptor_ascii(handle, devdesc.iSerialNumber, (unsigned char*)usbdev->serial, sizeof(usbdev->serial));
+	if (res > 0) {
+		if (res == 24) {
+			memmove(&usbdev->serial[9], &usbdev->serial[8], 16);
+			usbdev->serial[8] = '-';
+			usbdev->serial[25] = '\0';
+		}
+	} else {
+		usbmuxd_log(LL_WARNING, "Could not get serial number for device %d-%d: %s", bus, address, libusb_error_name(res));
+		usbdev->serial[0] = '\0';
+	}
+#endif
 
 	collection_init(&usbdev->tx_xfers);
 	collection_init(&usbdev->rx_xfers);
@@ -897,21 +939,39 @@ uint64_t usb_get_speed(struct usb_device *dev)
 	return dev->speed;
 }
 
+// poll interval when libusb provides no pollable fds (e.g. on Windows)
+#define USB_FALLBACK_POLL_MS 10
+
+static int usb_poll_fallback;
+
+int usb_uses_poll_fallback(void)
+{
+	return usb_poll_fallback;
+}
+
 void usb_get_fds(struct fdlist *list)
 {
+#ifdef _WIN32
+	(void)list;
+	usb_poll_fallback = 1;
+#else
 	const struct libusb_pollfd **usbfds;
 	const struct libusb_pollfd **p;
 	usbfds = libusb_get_pollfds(NULL);
 	if(!usbfds) {
-		usbmuxd_log(LL_ERROR, "libusb_get_pollfds failed");
+		if (!usb_poll_fallback)
+			usbmuxd_log(LL_ERROR, "libusb_get_pollfds failed, falling back to %d ms polling", USB_FALLBACK_POLL_MS);
+		usb_poll_fallback = 1;
 		return;
 	}
+	usb_poll_fallback = 0;
 	p = usbfds;
 	while(*p) {
 		fdlist_add(list, FD_USB, (*p)->fd, (*p)->events);
 		p++;
 	}
 	free(usbfds);
+#endif
 }
 
 void usb_autodiscover(int enable)
@@ -943,16 +1003,18 @@ int usb_get_timeout(void)
 	int pollrem;
 	pollrem = dev_poll_remain_ms();
 	res = libusb_get_next_timeout(NULL, &tv);
-	if(res == 0)
-		return pollrem;
-	if(res < 0) {
+	if(res < 0)
 		usbmuxd_log(LL_ERROR, "libusb_get_next_timeout failed: %s", libusb_error_name(res));
-		return pollrem;
+	if(res <= 0) {
+		msec = pollrem;
+	} else {
+		msec = tv.tv_sec * 1000;
+		msec += tv.tv_usec / 1000;
+		if(msec > pollrem)
+			msec = pollrem;
 	}
-	msec = tv.tv_sec * 1000;
-	msec += tv.tv_usec / 1000;
-	if(msec > pollrem)
-		return pollrem;
+	if(usb_poll_fallback && msec > USB_FALLBACK_POLL_MS)
+		msec = USB_FALLBACK_POLL_MS;
 	return msec;
 }
 
@@ -1011,7 +1073,7 @@ int usb_process_timeout(int msec)
 #ifdef HAVE_LIBUSB_HOTPLUG_API
 static libusb_hotplug_callback_handle usb_hotplug_cb_handle;
 
-static int usb_hotplug_cb(libusb_context *ctx, libusb_device *device, libusb_hotplug_event event, void *user_data)
+static int LIBUSB_CALL usb_hotplug_cb(libusb_context *ctx, libusb_device *device, libusb_hotplug_event event, void *user_data)
 {
 	if (LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED == event) {
 		if (device_hotplug) {
@@ -1056,6 +1118,10 @@ int usb_init(void)
 #endif
 
 	collection_init(&device_list);
+
+#ifdef _WIN32
+	usb_win32_init();
+#endif
 
 #ifdef HAVE_LIBUSB_HOTPLUG_API
 	if (libusb_has_capability(LIBUSB_CAP_HAS_HOTPLUG)) {

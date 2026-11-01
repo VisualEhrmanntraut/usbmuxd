@@ -28,7 +28,9 @@
 #include <stdarg.h>
 #include <time.h>
 #include <sys/time.h>
+#ifndef _WIN32
 #include <syslog.h>
+#endif
 
 #include "log.h"
 #include "utils.h"
@@ -39,19 +41,24 @@ int log_syslog = 0;
 
 void log_enable_syslog()
 {
+#ifndef _WIN32
 	if (!log_syslog) {
 		openlog("usbmuxd", LOG_PID, 0);
 		log_syslog = 1;
 	}
+#endif
 }
 
 void log_disable_syslog()
 {
+#ifndef _WIN32
 	if (log_syslog) {
 		closelog();
 	}
+#endif
 }
 
+#ifndef _WIN32
 static int level_to_syslog_level(int level)
 {
 	int result = level + LOG_CRIT;
@@ -60,6 +67,7 @@ static int level_to_syslog_level(int level)
 	}
 	return result;
 }
+#endif
 
 void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 {
@@ -79,7 +87,11 @@ void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 		struct tm *tp;
 
 		gettimeofday(&ts, NULL);
-#ifdef HAVE_LOCALTIME_R
+#ifdef _WIN32
+		time_t tt = ts.tv_sec;
+		localtime_s(&tp_, &tt);
+		tp = &tp_;
+#elif defined(HAVE_LOCALTIME_R)
 		tp = localtime_r(&ts.tv_sec, &tp_);
 #else
 		tp = localtime(&ts.tv_sec);
@@ -91,7 +103,9 @@ void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 
 	va_start(ap, fmt);
 	if (log_syslog) {
+#ifndef _WIN32
 		vsyslog(level_to_syslog_level(level), fs, ap);
+#endif
 	} else {
 		vfprintf(stderr, fs, ap);
 	}

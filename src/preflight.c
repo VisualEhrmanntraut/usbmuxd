@@ -224,7 +224,7 @@ retry:
 		plist_free(value);
 
 		if (!version_str) {
-			usbmuxd_log(LL_ERROR, "%s: Could not get ProductVersion string from device %s handle %d", __func__, _dev->udid, (int)(long)_dev->conn_data);
+			usbmuxd_log(LL_ERROR, "%s: Could not get ProductVersion string from device %s handle %d", __func__, _dev->udid, (int)(uintptr_t)_dev->conn_data);
 			goto leave;
 		}
 	}
@@ -240,7 +240,7 @@ retry:
 	plist_free(value);
 
 	if (!deviceclass_str) {
-		usbmuxd_log(LL_ERROR, "%s: Could not get DeviceClass string from device %s handle %d", __func__, _dev->udid, (int)(long)_dev->conn_data);
+		usbmuxd_log(LL_ERROR, "%s: Could not get DeviceClass string from device %s handle %d", __func__, _dev->udid, (int)(uintptr_t)_dev->conn_data);
 		goto leave;
 	}
 

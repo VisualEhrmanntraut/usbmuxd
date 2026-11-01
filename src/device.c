@@ -26,8 +26,30 @@
 #endif
 
 #include <sys/time.h>
+#ifdef _WIN32
+#include <winsock2.h>
+struct tcphdr {
+	UINT16 th_sport;
+	UINT16 th_dport;
+	UINT32 th_seq;
+	UINT32 th_ack;
+	UINT8 th_x2:4;
+	UINT8 th_off:4;
+	UINT8 th_flags;
+#define TH_FIN 0x01
+#define TH_SYN 0x02
+#define TH_RST 0x04
+#define TH_PUSH 0x08
+#define TH_ACK 0x10
+#define TH_URG 0x20
+	UINT16 th_win;
+	UINT16 th_sum;
+	UINT16 th_urp;
+};
+#else
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -642,7 +664,7 @@ static void device_tcp_input(struct mux_device *dev, struct tcphdr *th, unsigned
 	struct mux_connection *conn = NULL;
 
 	usbmuxd_log(LL_DEBUG, "[IN] dev=%d sport=%d dport=%d seq=%d ack=%d flags=0x%x window=%d[%d] len=%d",
-		dev->id, dport, sport, ntohl(th->th_seq), ntohl(th->th_ack), th->th_flags, ntohs(th->th_win) << 8, ntohs(th->th_win), payload_length);
+		dev->id, dport, sport, (int)ntohl(th->th_seq), (int)ntohl(th->th_ack), th->th_flags, ntohs(th->th_win) << 8, ntohs(th->th_win), payload_length);
 
 	if(dev->state != MUXDEV_ACTIVE) {
 		usbmuxd_log(LL_ERROR, "Received TCP packet from device %d but the device isn't active yet, discarding", dev->id);
@@ -660,7 +682,7 @@ static void device_tcp_input(struct mux_device *dev, struct tcphdr *th, unsigned
 	if(!conn) {
 		if(!(th->th_flags & TH_RST)) {
 			usbmuxd_log(LL_INFO, "No connection for device %d incoming packet %d->%d", dev->id, dport, sport);
-			if(send_anon_rst(dev, sport, dport, ntohl(th->th_seq)) < 0)
+			if(send_anon_rst(dev, sport, dport, (int)ntohl(th->th_seq)) < 0)
 				usbmuxd_log(LL_ERROR, "Error sending TCP RST to device %d (%d->%d)", dev->id, sport, dport);
 		}
 		return;
@@ -785,7 +807,7 @@ void device_data_input(struct usb_device *usbdev, unsigned char *buffer, uint32_
 	struct mux_header *mhdr = (struct mux_header *)buffer;
 	int mux_header_size = ((dev->version < 2) ? 8 : sizeof(struct mux_header));
 	if(ntohl(mhdr->length) != length) {
-		usbmuxd_log(LL_ERROR, "Incoming packet size mismatch (dev %d, expected %d, got %d)", dev->id, ntohl(mhdr->length), length);
+		usbmuxd_log(LL_ERROR, "Incoming packet size mismatch (dev %d, expected %d, got %d)", dev->id, (int)ntohl(mhdr->length), length);
 		return;
 	}
 
@@ -821,7 +843,7 @@ void device_data_input(struct usb_device *usbdev, unsigned char *buffer, uint32_
 			device_tcp_input(dev, th, payload, payload_length);
 			break;
 		default:
-			usbmuxd_log(LL_ERROR, "Incoming packet for device %d has unknown protocol 0x%x)", dev->id, ntohl(mhdr->protocol));
+			usbmuxd_log(LL_ERROR, "Incoming packet for device %d has unknown protocol 0x%x)", dev->id, (int)ntohl(mhdr->protocol));
 			break;
 	}
 

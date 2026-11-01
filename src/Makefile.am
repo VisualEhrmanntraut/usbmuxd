@@ -30,3 +30,8 @@ usbmuxd_SOURCES = \
 	utils.c utils.h \
 	conf.c conf.h \
 	main.c
+
+if WIN32
+usbmuxd_SOURCES += usb_win32.c usb_win32.h
+usbmuxd_LDFLAGS += -lws2_32
+endif

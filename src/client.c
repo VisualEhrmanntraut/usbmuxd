@@ -30,11 +30,15 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
+#endif
 #include <fcntl.h>
 
 #include <plist/plist.h>
@@ -139,11 +143,15 @@ int client_write(struct mux_client *client, void *buffer, uint32_t len)
 
 	sret = send(client->fd, buffer, len, 0);
 	if (sret < 0) {
+#ifdef _WIN32
+		if (WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
 		if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+#endif
 			usbmuxd_log(LL_DEBUG, "client_write: fd %d not ready for writing", client->fd);
 			sret = 0;
 		} else {
-			usbmuxd_log(LL_ERROR, "ERROR: client_write: sending to fd %d failed: %s", client->fd, strerror(errno));
+			usbmuxd_log(LL_ERROR, "ERROR: client_write: sending to fd %d failed: %s", client->fd, sock_strerror());
 		}
 	}
 	return sret;
@@ -182,15 +190,27 @@ int client_set_events(struct mux_client *client, short events)
  */
 int client_accept(int listenfd)
 {
+#ifdef _WIN32
+	struct sockaddr_in addr;
+#else
 	struct sockaddr_un addr;
+#endif
 	int cfd;
+#ifdef _WIN32
+	int len = sizeof(struct sockaddr_in);
+#else
 	socklen_t len = sizeof(struct sockaddr_un);
+#endif
 	cfd = accept(listenfd, (struct sockaddr *)&addr, &len);
 	if (cfd < 0) {
-		usbmuxd_log(LL_ERROR, "accept() failed (%s)", strerror(errno));
+		usbmuxd_log(LL_ERROR, "accept() failed (%s)", sock_strerror());
 		return cfd;
 	}
 
+#ifdef _WIN32
+	u_long l_yes = 1;
+	ioctlsocket(cfd, FIONBIO, &l_yes);
+#else
 	int flags = fcntl(cfd, F_GETFL, 0);
 	if (flags < 0) {
 		usbmuxd_log(LL_ERROR, "ERROR: Could not get socket flags!");
@@ -199,12 +219,13 @@ int client_accept(int listenfd)
 			usbmuxd_log(LL_ERROR, "ERROR: Could not set socket to non-blocking mode");
 		}
 	}
+#endif
 
 	int bufsize = 0x20000;
-	if (setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(int)) == -1) {
+	if (setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, (void*)&bufsize, sizeof(int)) == -1) {
 		usbmuxd_log(LL_WARNING, "Could not set send buffer for client socket");
 	}
-	if (setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(int)) == -1) {
+	if (setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, (void*)&bufsize, sizeof(int)) == -1) {
 		usbmuxd_log(LL_WARNING, "Could not set receive buffer for client socket");
 	}
 
@@ -289,7 +310,7 @@ void client_close(struct mux_client *client)
 		client->state = CLIENT_DEAD;
 		device_abort_connect(client->connect_device, client);
 	}
-	close(client->fd);
+	sock_close(client->fd);
 	free(client->ob_buf);
 	free(client->ib_buf);
 	plist_free(client->info);
@@ -881,9 +902,9 @@ static void output_buffer_process(struct mux_client *client)
 		client->events &= ~POLLOUT;
 		return;
 	}
-	res = send(client->fd, client->ob_buf, client->ob_size, 0);
+	res = send(client->fd, (void*)client->ob_buf, client->ob_size, 0);
 	if(res <= 0) {
-		usbmuxd_log(LL_ERROR, "Sending to client fd %d failed: %d %s", client->fd, res, strerror(errno));
+		usbmuxd_log(LL_ERROR, "Sending to client fd %d failed: %d %s", client->fd, res, sock_strerror());
 		client_close(client);
 		return;
 	}
@@ -908,10 +929,10 @@ static void input_buffer_process(struct mux_client *client)
 	int res;
 	int did_read = 0;
 	if(client->ib_size < sizeof(struct usbmuxd_header)) {
-		res = recv(client->fd, client->ib_buf + client->ib_size, sizeof(struct usbmuxd_header) - client->ib_size, 0);
+		res = recv(client->fd, (void*)(client->ib_buf + client->ib_size), sizeof(struct usbmuxd_header) - client->ib_size, 0);
 		if(res <= 0) {
 			if(res < 0)
-				usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, strerror(errno));
+				usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, sock_strerror());
 			else
 				usbmuxd_log(LL_INFO, "Client %d connection closed", client->fd);
 			client_close(client);
@@ -936,9 +957,9 @@ static void input_buffer_process(struct mux_client *client)
 	if(client->ib_size < hdr->length) {
 		if(did_read)
 			return; //maybe we would block, so defer to next loop
-		res = recv(client->fd, client->ib_buf + client->ib_size, hdr->length - client->ib_size, 0);
+		res = recv(client->fd, (void*)(client->ib_buf + client->ib_size), hdr->length - client->ib_size, 0);
 		if(res < 0) {
-			usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, strerror(errno));
+			usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, sock_strerror());
 			client_close(client);
 			return;
 		} else if(res == 0) {
